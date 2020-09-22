@@ -1,4 +1,4 @@
-module audiomixer
+module github.com/basheuft/audiomixer
 
 go 1.15
 
