@@ -133,7 +133,8 @@ func CreateSource(name, uri string, pipeline *gst.Pipeline, volume float64, onEO
 				if eventName == "eos" {
 					// End of stream, teardown and start callback
 					s.Teardown()
-					go s.onEOS(s)
+					defer s.onEOS(s)
+					return
 				} else {
 					//log.Printf("PAD PROBE EVENT: %s", eventName)
 				}

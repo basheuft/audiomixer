@@ -16,54 +16,6 @@ var mutex = &sync.Mutex{}
 var MainSource *Source
 var otherSources = make(map[string]*Source)
 
-//func main() {
-//	log.SetFlags(log.Ltime | log.Lshortfile)
-//
-//	//uri := "file:///home/bas/Documents/Projecten/rudi/jingles/sigaar-uit-eigen-kist.ogg"
-//	uri := "https://italo.italo.nu/"
-//
-//	ended, err := PlayMain(uri)
-//	if err != nil {
-//		log.Fatal(err)
-//	}
-//
-//	time.Sleep(time.Second * 5)
-//	anotherEnded, err := PlayAnother("file:///home/bas/Documents/Projecten/rudi/jingles/badkamer-volgescheten.ogg", "")
-//	if err != nil {
-//		log.Print(err)
-//	}
-//
-//	time.Sleep(time.Millisecond * 300)
-//	anotherEnded, err = PlayAnother("file:///home/bas/Documents/Projecten/rudi/jingles/badkamer-volgescheten.ogg", "")
-//	if err != nil {
-//		log.Print(err)
-//	}
-//
-//	time.Sleep(time.Millisecond * 300)
-//	anotherEnded, err = PlayAnother("file:///home/bas/Documents/Projecten/rudi/jingles/badkamer-volgescheten.ogg", "")
-//	if err != nil {
-//		log.Print(err)
-//	}
-//	time.Sleep(time.Millisecond * 300)
-//	anotherEnded, err = PlayAnother("file:///home/bas/Documents/Projecten/rudi/jingles/badkamer-volgescheten.ogg", "")
-//	if err != nil {
-//		log.Print(err)
-//	}
-//	time.Sleep(time.Millisecond * 300)
-//	anotherEnded, err = PlayAnother("file:///home/bas/Documents/Projecten/rudi/jingles/badkamer-volgescheten.ogg", "")
-//	if err != nil {
-//		log.Print(err)
-//	}
-//
-//	go func() {
-//		<-anotherEnded
-//		log.Print("ANOTHER ENDED")
-//	}()
-//
-//	<-ended
-//	log.Print("Pipeline ended")
-//}
-
 func PullSinkSample() (sampleChan chan *gst.Sample) {
 	sampleChan = make(chan *gst.Sample)
 	go func() {
@@ -98,7 +50,9 @@ func PlayMain(uri string) (ended chan bool, err error) {
 		pipeline,
 		0.2,
 		func (s *Source) {
+			log.Print("EOS Callback")
 			MainSource = nil
+			pipeline = nil
 		},
 	)
 	if err != nil {
@@ -221,6 +175,9 @@ func onEOS(s *Source) {
 }
 
 func StopMain() {
+	if MainSource == nil {
+		return
+	}
 	MainSource.pipeline.SendEvent(gst.NewEosEvent())
 	<-MainSource.tearDownDone
 	pipeline = nil
