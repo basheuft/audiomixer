@@ -1,10 +1,12 @@
 package audiomixer
 
 import (
+	"context"
 	"fmt"
 	"github.com/notedit/gst"
 	"log"
 	"sync"
+	"time"
 )
 
 const STATE_NOT_STARTED = 0
@@ -13,84 +15,136 @@ const STATE_PAUSED = 2
 const STATE_STOPPED = 3
 
 type DstPipe struct {
-	Pipe
-	name string
+	name     string
+	pipeline *gst.Pipeline
+	mutex    *sync.Mutex
+	sources  map[string]*Src
 
-	mutex *sync.Mutex
-	state int
+	adderEl *gst.Element
+	encoderEl *gst.Element
+	sinkEl *gst.Element
 
-	stopChan chan bool
-
-	sampleChan chan *gst.Sample
+	eosChan chan bool
 }
 
-func CreateDstPipe() (pipe *DstPipe, err error) {
+func CreateDstPipe(sources ...*Src) (p *DstPipe, err error) {
 	name := "dst"
 	pipeline, err := gst.PipelineNew(name)
 	if err != nil {
 		return
 	}
 
+	p = &DstPipe{
+		name:     name,
+		pipeline: pipeline,
+		mutex:    &sync.Mutex{},
+		sources:  make(map[string]*Src),
+	}
+
 	//capsFilterEl, err := gst.ElementFactoryMake("capsfilter", fmt.Sprintf("%s_capsfilter", name))
-	adderEl, err := gst.ElementFactoryMake("adder", fmt.Sprintf("%s_adder", name))
-	encoderEl, err := gst.ElementFactoryMake("opusenc", fmt.Sprintf("%s_encoder", name))
-	sinkEl, err := gst.ElementFactoryMake("appsink", fmt.Sprintf("%s_sink", name))
+	p.adderEl, err = gst.ElementFactoryMake("adder", fmt.Sprintf("%s_adder", name))
+	p.encoderEl, err = gst.ElementFactoryMake("opusenc", fmt.Sprintf("%s_encoder", name))
+	p.sinkEl, err = gst.ElementFactoryMake("appsink", fmt.Sprintf("%s_sink", name))
 	if err != nil {
 		return
 	}
 
 	//pipeline.Add(capsFilterEl)
-	pipeline.Add(adderEl)
-	pipeline.Add(encoderEl)
-	pipeline.Add(sinkEl)
+	pipeline.Add(p.adderEl)
+	pipeline.Add(p.encoderEl)
+	pipeline.Add(p.sinkEl)
 
 	//capsFilterEl.Link(adderEl)
-	adderEl.Link(encoderEl)
-	encoderEl.Link(sinkEl)
+	p.adderEl.Link(p.encoderEl)
+	p.encoderEl.Link(p.sinkEl)
 
-	pipe = &DstPipe{
-		name: name,
-		Pipe: Pipe{pipeline: pipeline},
-		mutex: &sync.Mutex{},
-		state: STATE_NOT_STARTED,
+	p = &DstPipe{
+		name:     name,
+		pipeline: pipeline,
+		mutex:    &sync.Mutex{},
+		sources:  make(map[string]*Src),
+		eosChan: make(chan bool),
 	}
 
-	bus := pipeline.GetBus()
-	go pipe.pollBusMessages(bus)
+	p.pipeline.SetState(gst.StatePlaying)
+
+	// Link sources
+	for _, src := range sources {
+		err = p.LinkSrc(src)
+		if err != nil {
+			log.Print(err)
+			continue
+		}
+	}
+
+	log.Print("Sources linked")
+
+	busMessagesCtx, _ := context.WithDeadline(context.Background(), time.Now().Add(time.Minute*1))
+	go p.pollBusMessages(busMessagesCtx, p.pipeline.GetBus())
 
 	return
 }
 
-func (p *DstPipe) LinkSrc(srcPipe *SrcPipe) (err error) {
-	//capsFilterEl.SetObject("caps", gst.CapsFromString("audio/x-raw"))
-	//channel := fmt.Sprintf("%s_%s", srcPipe.name, p.name)
+func (p *DstPipe) LinkSrc(srcPipe *Src) error {
+
+	p.pipeline.Add(&srcPipe.bin.Element)
 	adderEl := p.pipeline.GetByName(fmt.Sprintf("%s_adder", p.name))
 
 	template := adderEl.GetPadTemplate("sink_%u")
 	requestPad := adderEl.GetRequestPad(template, "sink_%u", audioCaps)
 
-	srcPipe.audioSinkPad.Link(requestPad)
+	r := srcPipe.audioSinkPad.Link(requestPad)
+	if int(r) != 0 {
+		return fmt.Errorf("Ghostpad could not be linked to adder sinkpad")
+	}
 
-	return
+	p.mutex.Lock()
+	p.sources[srcPipe.name] = srcPipe
+	p.mutex.Unlock()
+
+	return nil
 }
 
-func (p *DstPipe) AddSource(srcPipe *SrcPipe) {
+func (p *DstPipe) AddSource(srcPipe *Src) {
 	p.pipeline.Add(&srcPipe.bin.Element)
 }
 
-func (p *DstPipe) Start() {
-	p.mutex.Lock()
-	defer p.mutex.Unlock()
+func (p *DstPipe) Run(parentCtx context.Context, sampleChan chan *gst.Sample) {
 
-	p.state = STATE_PLAYING
 	p.pipeline.SetState(gst.StatePlaying)
+
+	log.Print("Start pulling samples")
+	// Start pulling samples
+	sinkEl := p.pipeline.GetByName(fmt.Sprintf("%s_sink", p.name))
+	log.Print(sinkEl)
+
+	var sample *gst.Sample
+	var err error
+	for {
+		select {
+		case <-parentCtx.Done():
+			log.Print("PARENT CTX Done")
+			close(sampleChan)
+			return
+		case <-p.eosChan:
+			log.Print("EOS RECEIVED")
+			return
+		default:
+			sample, err = sinkEl.PullSample()
+			if err != nil {
+				log.Print(err)
+				continue
+			}
+			sampleChan <- sample
+		}
+	}
+
 }
 
 func (p *DstPipe) Pause() {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 
-	p.state = STATE_PAUSED
 	p.pipeline.SetState(gst.StatePaused)
 }
 
@@ -98,97 +152,105 @@ func (p *DstPipe) Resume() {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
 
-	p.state = STATE_PLAYING
 	p.pipeline.SetState(gst.StatePlaying)
-}
-
-func (p *DstPipe) GetState() int {
-	return p.state
 }
 
 func (p *DstPipe) Stop(natural bool) {
 	log.Print("STOPPING DST...", natural)
-	if p.state == STATE_STOPPED || p.pipeline == nil {
-		log.Print("ALREADY STOPPED..")
-		return
-	}
 
-	if !natural {
-		p.mutex.Lock()
-		p.stopChan = make(chan bool)
-		p.mutex.Unlock()
-
-		go p.pipeline.SendEvent(gst.NewEosEvent())
-
-	} else {
-		p.mutex.Lock()
-		defer p.mutex.Unlock()
-
-		if p.stopChan != nil {
-			<-p.stopChan
-		}
-
-		p.pipeline.SetState(gst.StateNull)
-		p.pipeline = nil
-		p.stopChan = nil
-	}
-
-	p.state = STATE_STOPPED
+	//if !natural {
+	//	p.mutex.Lock()
+	//	p.stopChan = make(chan bool)
+	//	p.mutex.Unlock()
+	//
+	//	go p.pipeline.SendEvent(gst.NewEosEvent())
+	//
+	//} else {
+	//	p.mutex.Lock()
+	//	defer p.mutex.Unlock()
+	//
+	//	if p.stopChan != nil {
+	//		<-p.stopChan
+	//	}
+	//
+	//	p.pipeline.SetState(gst.StateNull)
+	//	p.pipeline = nil
+	//	p.stopChan = nil
+	//}
 
 	log.Print("STOPPED")
 }
 
-func (p *DstPipe) IsPlaying() bool {
-	return p.state == STATE_PLAYING
+//func (p *DstPipe) PullSample(ctx context.Context) *gst.Sample {
+//
+//	sinkEl := p.pipeline.GetByName(fmt.Sprintf("%s_sink", p.name))
+//	if sinkEl == nil {
+//		return nil
+//	}
+//
+//	p.sampleChan = make(chan *gst.Sample)
+//
+//	go func() {
+//		var sample *gst.Sample
+//		var err error
+//
+//		for {
+//			select {
+//			case <-ctx.Done():
+//				return
+//			default:
+//				if p.pipeline == nil {
+//					close(p.sampleChan)
+//					return
+//				}
+//				sample, err = sinkEl.PullSample()
+//				if err != nil {
+//					continue
+//				}
+//				p.sampleChan <- sample
+//			}
+//		}
+//	}()
+//
+//	return p.sampleChan
+//}
+
+func (p *DstPipe) GetBus() *gst.Bus {
+	return p.pipeline.GetBus()
 }
 
-func (p *DstPipe) IsPaused() bool {
-	return p.state == STATE_PAUSED
+func (p *DstPipe) SetState(state gst.StateOptions) {
+	p.pipeline.SetState(state)
 }
 
-func (p *DstPipe) PullSample() chan *gst.Sample {
-
-	sinkEl := p.pipeline.GetByName(fmt.Sprintf("%s_sink", p.name))
-	if sinkEl == nil {
-		return nil
+func (p *DstPipe) pollBusMessages(ctx context.Context, bus *gst.Bus) {
+	if bus == nil {
+		log.Print("Bus is nil")
+		return
 	}
 
-	p.sampleChan = make(chan *gst.Sample)
+	log.Print("Pulling bus-messages")
 
-	go func() {
-		var sample *gst.Sample
-		var err error
-		for {
-			if p.pipeline == nil {
-				close(p.sampleChan)
+	for {
+		select {
+		case <-ctx.Done():
+			log.Print("Stopping pulling bus-messages")
+			return
+		default:
+			log.Print("Waiting for bus-message")
+			message := bus.Pull(gst.MessageError | gst.MessageWarning | gst.MessageEos)
+			log.Print("Bus-message received")
+			log.Printf("Message: %s", message.GetName())
+
+			if message.GetStructure().C != nil {
+				log.Print(message.GetStructure().ToString())
+			}
+
+			if message.GetType() == gst.MessageEos {
+				//p.Stop(true)
+				p.eosChan <- true
 				return
 			}
-			sample, err = sinkEl.PullSample()
-			if err != nil {
-				continue
-			}
-			p.sampleChan <- sample
-		}
-	}()
-
-	return p.sampleChan
-}
-
-func (p *DstPipe) pollBusMessages(bus *gst.Bus) {
-	for {
-		message := bus.Pull(gst.MessageError | gst.MessageWarning | gst.MessageEos)
-		log.Printf("Message: %s", message.GetName())
-
-		if message.GetStructure().C != nil {
-			log.Print(message.GetStructure().ToString())
-		}
-
-		if message.GetType() == gst.MessageEos {
-			p.Stop(true)
-			if p.stopChan != nil {
-				p.stopChan <- true
-			}
-			return
 		}
 	}
 }
