@@ -20,11 +20,13 @@ type DstPipe struct {
 	mutex    *sync.Mutex
 	sources  map[string]*Src
 
-	adderEl *gst.Element
+	adderEl   *gst.Element
 	encoderEl *gst.Element
-	sinkEl *gst.Element
+	sinkEl    *gst.Element
 
 	eosChan chan bool
+
+	state int
 }
 
 func CreateDstPipe(sources ...*Src) (p *DstPipe, err error) {
@@ -63,7 +65,8 @@ func CreateDstPipe(sources ...*Src) (p *DstPipe, err error) {
 		pipeline: pipeline,
 		mutex:    &sync.Mutex{},
 		sources:  make(map[string]*Src),
-		eosChan: make(chan bool),
+		eosChan:  make(chan bool),
+		state:    STATE_PLAYING,
 	}
 
 	p.pipeline.SetState(gst.StatePlaying)
@@ -128,6 +131,7 @@ func (p *DstPipe) Run(parentCtx context.Context, sampleChan chan *gst.Sample) {
 			return
 		case <-p.eosChan:
 			log.Print("EOS RECEIVED")
+			close(sampleChan)
 			return
 		default:
 			sample, err = sinkEl.PullSample()
@@ -146,6 +150,7 @@ func (p *DstPipe) Pause() {
 	defer p.mutex.Unlock()
 
 	p.pipeline.SetState(gst.StatePaused)
+	p.state = STATE_PAUSED
 }
 
 func (p *DstPipe) Resume() {
@@ -153,6 +158,7 @@ func (p *DstPipe) Resume() {
 	defer p.mutex.Unlock()
 
 	p.pipeline.SetState(gst.StatePlaying)
+	p.state = STATE_PLAYING
 }
 
 func (p *DstPipe) Stop(natural bool) {
@@ -221,6 +227,10 @@ func (p *DstPipe) GetBus() *gst.Bus {
 
 func (p *DstPipe) SetState(state gst.StateOptions) {
 	p.pipeline.SetState(state)
+}
+
+func (p *DstPipe) GetState() int {
+	return p.state
 }
 
 func (p *DstPipe) pollBusMessages(ctx context.Context, bus *gst.Bus) {
