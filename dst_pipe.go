@@ -82,7 +82,7 @@ func CreateDstPipe(sources ...*Src) (p *DstPipe, err error) {
 
 	log.Print("Sources linked")
 
-	busMessagesCtx, _ := context.WithDeadline(context.Background(), time.Now().Add(time.Minute*1))
+	busMessagesCtx := context.Background()
 	go p.pollBusMessages(busMessagesCtx, p.pipeline.GetBus())
 
 	return
@@ -159,6 +159,19 @@ func (p *DstPipe) Resume() {
 
 	p.pipeline.SetState(gst.StatePlaying)
 	p.state = STATE_PLAYING
+}
+
+func (p *DstPipe) Teardown() {
+	if p == nil {
+		return
+	}
+	if p.pipeline != nil {
+		p.pipeline.SetState(gst.StateNull)
+	}
+	
+	for _, src := range p.sources {
+		src.bin.SetState(gst.StateNull)
+	}
 }
 
 func (p *DstPipe) Stop(natural bool) {
@@ -247,17 +260,21 @@ func (p *DstPipe) pollBusMessages(ctx context.Context, bus *gst.Bus) {
 			log.Print("Stopping pulling bus-messages")
 			return
 		default:
-			log.Print("Waiting for bus-message")
-			message := bus.Pull(gst.MessageError | gst.MessageWarning | gst.MessageEos)
+			//log.Print("Waiting for bus-message")
+			//message := bus.Pull(gst.MessageError | gst.MessageWarning | gst.MessageEos)
+			message := bus.Pop()
+			if message == nil || message.C == nil {
+				time.Sleep(time.Millisecond * 100)
+				break
+			}
 			log.Print("Bus-message received")
 			log.Printf("Message: %s", message.GetName())
 
-			if message.GetStructure().C != nil {
-				log.Print(message.GetStructure().ToString())
-			}
+			//if message.GetStructure().C != nil {
+			//	log.Print(message.GetStructure().ToString())
+			//}
 
 			if message.GetType() == gst.MessageEos {
-				//p.Stop(true)
 				p.eosChan <- true
 				return
 			}
