@@ -19,7 +19,7 @@ type Src struct {
 	decodeEl, convertEl, resampleEl, volumeEl *gst.Element
 }
 
-func CreateSource(name, uri string) (pipe *Src, err error) {
+func CreateSource(name, uri string, onEOS func()) (pipe *Src, err error) {
 	bin := gst.BinNew(name)
 
 	decodeEl, err := gst.ElementFactoryMake("uridecodebin3", fmt.Sprintf("%s_decode", name))
@@ -71,6 +71,11 @@ func CreateSource(name, uri string) (pipe *Src, err error) {
 	pipe.audioSinkPad.SetProbeCallback(gst.PAD_PROBE_TYPE_EVENT_DOWNSTREAM, func(callback gst.PadCallback, args ...interface{}) int {
 		eventName := args[1].(string)
 		if eventName == "eos" {
+			go func() {
+				// Cleanup
+				pipe.Cleanup()
+				onEOS()
+			}()
 			return gst.PAD_PROBE_REMOVE
 		}
 
@@ -146,6 +151,10 @@ func (p *Src) Duration() (time.Duration, error) {
 		return 0, nil
 	}
 	return decodeEl.QueryDuration()
+}
+
+func (p *Src) Cleanup() {
+	log.Print("SRC PIPE ENDED")
 }
 
 //func (p *SrcPipe) BlockProbe() {
